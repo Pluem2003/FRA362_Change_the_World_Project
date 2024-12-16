@@ -34,7 +34,7 @@ double R = 100;
 // New RTC memory variables to track sleep count
 RTC_DATA_ATTR float sensorReadings[20];
 RTC_DATA_ATTR uint32_t sleepCount = 0;  // Track number of deep sleep cycles
-RTC_DATA_ATTR uint8_t start = 0;
+RTC_DATA_ATTR uint8_t start = 0; 
 
 // BLE Variables
 BLEServer *pServer = nullptr;
@@ -159,7 +159,7 @@ void setup() {
     Serial.printf("MCP3221 I2C Reader Initialized\n");
     
     // Set sleep time (e.g., 30 seconds)
-    esp_sleep_enable_timer_wakeup(DATA_INTERVAL * 1000000); // 30 seconds = 30,000,000 microseconds
+    // esp_sleep_enable_timer_wakeup(DATA_INTERVAL * 1000000); // 30 seconds = 30,000,000 microseconds
     // Print sleep count on startup
     Serial.printf("Total Sleep Cycles: %lu\n", sleepCount);
     // Initialize BLE

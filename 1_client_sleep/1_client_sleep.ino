@@ -6,8 +6,8 @@
 #include <math.h>
 
 // Configs
-#define DEVICE_NAME "ESP32-Current-Sensor2"
-#define SERVICE_UUID "12345678-1234-1234-1234-123456789ab2"
+#define DEVICE_NAME "ESP32-Current-Sensor1"
+#define SERVICE_UUID "12345678-1234-1234-1234-123456789ab1"
 #define CHAR_UUID "abcdabcd-1234-5678-abcd-123456789abc"
 #define DATA_INTERVAL 25    // Interval between sensor readings unit second(s)
 #define SEND_INTERVAL 1000    // Interval between sending data
@@ -34,6 +34,7 @@ double R = 100;
 // New RTC memory variables to track sleep count
 RTC_DATA_ATTR float sensorReadings[20];
 RTC_DATA_ATTR uint32_t sleepCount = 0;  // Track number of deep sleep cycles
+RTC_DATA_ATTR uint8_t start = 0; 
 
 // BLE Variables
 BLEServer *pServer = nullptr;
@@ -158,7 +159,7 @@ void setup() {
     Serial.printf("MCP3221 I2C Reader Initialized\n");
     
     // Set sleep time (e.g., 30 seconds)
-    esp_sleep_enable_timer_wakeup(DATA_INTERVAL * 1000000); // 30 seconds = 30,000,000 microseconds
+    // esp_sleep_enable_timer_wakeup(DATA_INTERVAL * 1000000); // 30 seconds = 30,000,000 microseconds
     // Print sleep count on startup
     Serial.printf("Total Sleep Cycles: %lu\n", sleepCount);
     // Initialize BLE
@@ -188,6 +189,10 @@ void setup() {
 }
 
 void loop() {
+    if(start == 0){
+      start = 1;
+      esp_deep_sleep_start();
+    }
     readSensorData();
     if(!deviceConnected) {
         BLEDevice::startAdvertising();

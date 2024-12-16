@@ -9,7 +9,7 @@
 #define DEVICE_NAME "ESP32-Current-Sensor2"
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789ab2"
 #define CHAR_UUID "abcdabcd-1234-5678-abcd-123456789abc"
-#define DATA_INTERVAL 1000    // Interval between sensor readings
+#define DATA_INTERVAL 1000    // Interval between sensor readings unit second(s)
 #define SEND_INTERVAL 1000    // Interval between sending data
 
 // MCP3221 Configuration
@@ -24,9 +24,15 @@ signed long long sum_all = 0;
 signed long long check_overflow = 0;
 uint32_t count_Value = 0;
 uint32_t count_overflow = 0;
-double currentReading = 0;
-double gain = 0;
-double currentReal = 0;
+uint32_t count_sensorReading = 0;
+double current = 0;
+double V = 0;
+double V_rms = 0;
+double gain = 100;
+double R = 100;
+
+// New RTC memory variables to track sleep count
+RTC_DATA_ATTR float sensorReadings[20];
 
 // BLE Variables
 BLEServer *pServer = nullptr;
@@ -40,7 +46,7 @@ int measurementCycle = 0;
 class CharacteristicCallbacks: public BLECharacteristicCallbacks {
     void onStatus(BLECharacteristic* pCharacteristic, Status s, uint32_t code) {
         if (s == Status::SUCCESS_NOTIFY) {
-            Serial.println("Notification success!");
+            Serial.printf("Notification success!\n");
         } else {
             Serial.printf("Notification failed: status=%d, code=%d\n", s, code);
         }
@@ -50,12 +56,12 @@ class CharacteristicCallbacks: public BLECharacteristicCallbacks {
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         deviceConnected = true;
-        Serial.println("Device connected");
+        Serial.printf("Device connected\n");
     }
     
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
-        Serial.println("Device disconnected");
+        Serial.printf("Device disconnected\n");
         BLEDevice::startAdvertising();
     }
 };
@@ -74,40 +80,11 @@ uint16_t readMCP3221() {
     return rawData;
 }
 
-double calculateGain(double current) {
-    double gain;
-
-    if (current >= 0 && current < 8) {
-        // Fixed value for 0 <= x < 30
-        gain = 0.048;
-  } else if (current >=8  && current < 53.8) {
-        // Fixed value for 30 <= x < 50
-        gain = 0.043;
-    } else if (current >= 25 && current < 53.8) {
-        // Fixed value for 30 <= x < 50
-        gain = 0.0813;
-    } else if (current >= 53.8 && current < 100) {
-        // Fixed value for 30 <= x < 50
-        gain = 0.0773;
-    } else if (current >= 100 && current < 400) {
-        // Equation for 50 <= x < 400
-        gain = 0.0773;
-    } else if (current >= 400) {
-        // Fixed value for x > 400
-        gain = 0.01361;
-    } else {
-        // Default case (outside defined ranges)
-        gain = 0.0; // or handle error
-    }
-
-    return gain;
-}
-
 void readSensorData() {
     uint16_t adcValue = readMCP3221(); // Read ADC value
-    
+    V = (adcValue * 3.3*1000) / 4096.0; // คำนวณแรงดันไฟฟ้า (VREF = 3.3V) mV
     // Update running sum for RMS calculation
-    sum_all += (adcValue - offset) * (adcValue - offset);
+    sum_all += (V - offset) * (V - offset);
     count_Value++;
     
     // Check for overflow
@@ -115,20 +92,18 @@ void readSensorData() {
         count_overflow++;
         sum_all = 0;
         count_Value = 0;
-        sum_all += (adcValue - offset) * (adcValue - offset);
+        sum_all += (V - offset) * (V - offset);
         count_Value++;
     }
     
     // Calculate RMS current every 4000 samples
     if(count_Value == 4000) {
-        currentReading = sqrt(sum_all / count_Value);
-        
+        V_rms = sqrt(sum_all / count_Value);
         sum_all = 0;
         count_Value = 0;
-        gain = calculateGain(currentReading);
-        currentReal = currentReading*gain;
-        
-        // Serial.printf("%f,  %f, %f\n",current,gain,currentReal);
+        current = V_rms/R;
+        sensorReadings[count_sensorReading] = current;
+        count_sensorReading++;
         
     }
 }
@@ -143,10 +118,16 @@ void sendRealtimeData() {
         return;
     }
 
-    // Prepare data string with measurement cycle and timestamp
-    String data = String(measurementCycle) + "," + 
-                  String(millis()) + "," + 
-                  String(currentReading);
+    // Prepare data string with measurement cycle, sleep count, and sensor readings
+    String data = String(measurementCycle) + ",";
+    
+    // Add all sensor readings to the data string
+    for (int i = 0; i < count_sensorReading; i++) {
+        data += String(sensorReadings[i]);
+        if (i < count_sensorReading - 1) {
+            data += ",";
+        }
+    }
 
     Serial.printf("Sending real-time data: %s\n", data.c_str());
     
@@ -155,6 +136,9 @@ void sendRealtimeData() {
     
     lastNotifyTime = currentTime;
     measurementCycle++;
+
+    // Reset count_sensorReading after sending
+    count_sensorReading = 0;
 }
 
 void setup() {
@@ -163,7 +147,7 @@ void setup() {
     // Initialize I2C
     Wire.begin();
     Wire.setClock(clockFrequency);
-    Serial.println("MCP3221 I2C Reader Initialized");
+    Serial.printf("MCP3221 I2C Reader Initialized\n");
     
     // Initialize BLE
     BLEDevice::init(DEVICE_NAME);
@@ -185,19 +169,20 @@ void setup() {
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
     pAdvertising->setMinPreferred(0x06);
+
     BLEDevice::startAdvertising();
     
-    Serial.println("Current Sensor ready and advertising...");
+    Serial.printf("Current Sensor ready and advertising...\n");
 }
 
 void loop() {
-    unsigned long currentTime = millis();
-    // uint16_t adcValue = readMCP3221(); // Read ADC value
-    // Serial.println(adcValue-126);
     readSensorData();
-    if (currentTime - lastSendingTime >= SEND_INTERVAL) {
-        lastSendingTime = currentTime;
-        sendRealtimeData();
+    if(!deviceConnected) {
+        BLEDevice::startAdvertising();
     }
-    
+    if(count_sensorReading == 20){
+        if(deviceConnected) {
+            sendRealtimeData();
+        }
+    }
 }
