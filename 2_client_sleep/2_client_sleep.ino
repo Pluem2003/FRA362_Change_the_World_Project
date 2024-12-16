@@ -34,6 +34,7 @@ double R = 100;
 // New RTC memory variables to track sleep count
 RTC_DATA_ATTR float sensorReadings[20];
 RTC_DATA_ATTR uint32_t sleepCount = 0;  // Track number of deep sleep cycles
+RTC_DATA_ATTR uint8_t start = 0;
 
 // BLE Variables
 BLEServer *pServer = nullptr;
@@ -188,6 +189,10 @@ void setup() {
 }
 
 void loop() {
+    if(start == 0){
+      start = 1;
+      esp_deep_sleep_start();
+    }
     readSensorData();
     if(!deviceConnected) {
         BLEDevice::startAdvertising();
