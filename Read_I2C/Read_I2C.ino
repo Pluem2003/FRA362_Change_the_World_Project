@@ -34,24 +34,8 @@ uint16_t readMCP3221() {
   return rawData;
 }
 
-// float calculateGain(float x) {
-//   if (x <= 50) {
-//     // Use the first equation for x <= 50
-//     float a1 = -0.169;
-//     float b1 = 0.094;
-//     float c1 = 0.111;
-//     return a1 * exp(b1 * x) + c1;
-//   } else {
-//     // Use the second equation for x > 50
-//     float a2 = 0.000006;
-//     float b2 = -0.0047;
-//     float c2 = 0.9148;
-//     return a2 * x * x + b2 * x + c2;
-//   }
-// }
-
 void setup() {
-  Wire.begin();
+  Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(clockFrequency);
   Serial.begin(115200);
   Serial.println("MCP3221 I2C Reader Initialized");
@@ -61,9 +45,8 @@ void loop() {
   check_overflow = sum_all;
   uint16_t adcValue = readMCP3221(); // อ่านค่า ADC
   V = (adcValue * 3.3*1000) / 4096.0; // คำนวณแรงดันไฟฟ้า (VREF = 3.3V) mV
-  // Serial.println(adcValue - offset);
-  // Serial.printf("%d, %f,  %f, %f\n",adcValue,current,gain,currentReal);
   Serial.printf("%f, %f, %f\n",V-offset,V_rms,current);
+
   sum_all += (V - offset) * (V - offset);
   count_Value++;
   if(sum_all < check_overflow) {
@@ -77,8 +60,8 @@ void loop() {
     V_rms = sqrt(sum_all / count_Value);
     sum_all = 0;
     count_Value = 0;
-    // gain = calculateGain(V_rms);
     current = V_rms/R;
   }
-
+  delay(10);
+  
 }

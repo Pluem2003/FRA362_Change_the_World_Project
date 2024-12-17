@@ -8,7 +8,7 @@ const char* WIFI_PASSWORD = "76543210";
 const char* MQTT_SERVER = "49.228.131.61";
 const char* MQTT_CLIENT_ID = "ESP32_Gateway";
 #define MQTT_PORT 4663
-#define MQTT_TOPIC "sensor/sleep_mode"
+#define MQTT_TOPIC "sensor/realtime"
 #define MQTT_STATUS_TOPIC "sensor/status"
 #define timescan 10
 
@@ -18,12 +18,13 @@ static const BLEUUID SERVICE_UUID_2("12345678-1234-1234-1234-123456789ab2");
 static const BLEUUID CHAR_UUID("abcdabcd-1234-5678-abcd-123456789abc");
 static const BLEUUID SERVICE_UUIDS[] = {SERVICE_UUID_1, SERVICE_UUID_2};
 
-// Updated RealTimeSensorData structure to handle streaming
+// Updated RealTimeSensorData structure to handle more data
 struct RealTimeSensorData {
     int measurementCycle;
     unsigned long timestamp;
     float reading;
     String deviceName;
+    bool isNewData;
 };
 
 // Global variables
@@ -77,6 +78,11 @@ void sendStatusUpdate() {
 }
 
 void publishRealTimeData(uint8_t clientIdx) {
+    // Additional guard to ensure we only publish new, valid data
+    if (!sensorDataBuffer[clientIdx].isNewData) {
+        return;
+    }
+
     String jsonData = "{";
     jsonData += "\"device_id\":" + String(clientIdx + 1) + ",";
     jsonData += "\"device_name\":\"" + sensorDataBuffer[clientIdx].deviceName + "\",";
@@ -90,6 +96,9 @@ void publishRealTimeData(uint8_t clientIdx) {
         mqttClient.publish(topic.c_str(), jsonData.c_str());
         Serial.println("Published to MQTT: " + jsonData);
         lastDataReceived[clientIdx] = millis();
+        
+        // Reset the new data flag
+        sensorDataBuffer[clientIdx].isNewData = false;
     } else {
         Serial.println("MQTT not connected, cannot publish");
     }
@@ -99,56 +108,40 @@ void processIncomingData(uint8_t clientIdx, String value) {
     Serial.println("\n-------- Incoming Real-Time Data --------");
     Serial.printf("Device %d Raw Data: %s\n", clientIdx + 1, value.c_str());
 
-    // Split the data into parts
+    // More robust parsing with error handling
     int firstComma = value.indexOf(',');
-    if (firstComma == -1) {
+    int secondComma = value.indexOf(',', firstComma + 1);
+    
+    if (firstComma == -1 || secondComma == -1) {
         Serial.println("Invalid data format");
         return;
     }
-
-    // Parse measurement cycle
+    
+    // Parse data with additional validation
     int measurementCycle = value.substring(0, firstComma).toInt();
-
-    // Prepare JSON for multiple readings
-    String jsonData = "{";
-    jsonData += "\"device_id\":" + String(clientIdx + 1) + ",";
-    jsonData += "\"device_name\":\"" + deviceNames[clientIdx] + "\",";
-    jsonData += "\"measurement_cycle\":" + String(measurementCycle) + ",";
-    jsonData += "\"timestamp\":" + String(millis()) + ",";
-    jsonData += "\"readings\":[";
-
-    // Parse and add multiple readings
-    int startPos = firstComma + 1;
-    int readingCount = 0;
-    while (startPos < value.length()) {
-        int nextComma = value.indexOf(',', startPos);
-        if (nextComma == -1) nextComma = value.length();
-
-        float reading = value.substring(startPos, nextComma).toFloat();
-        
-        if (readingCount > 0) jsonData += ",";
-        jsonData += String(reading, 3);
-
-        startPos = nextComma + 1;
-        readingCount++;
+    unsigned long timestamp = value.substring(firstComma + 1, secondComma).toInt();
+    float reading = value.substring(secondComma + 1).toFloat();
+    
+    // Validate parsed data
+    if (measurementCycle < 0 || reading == 0.0) {
+        Serial.println("Invalid or zero data received");
+        return;
     }
-
-    jsonData += "]}";
-
+    
+    // Store in buffer with a new flag
+    sensorDataBuffer[clientIdx].measurementCycle = measurementCycle;
+    sensorDataBuffer[clientIdx].timestamp = timestamp;
+    sensorDataBuffer[clientIdx].reading = reading;
+    sensorDataBuffer[clientIdx].deviceName = deviceNames[clientIdx];
+    sensorDataBuffer[clientIdx].isNewData = true;
+    
     // Publish data
-    String topic = String(MQTT_TOPIC) + "/" + String(clientIdx + 1);
-    if (mqttClient.connected()) {
-        mqttClient.publish(topic.c_str(), jsonData.c_str());
-        Serial.println("Published to MQTT: " + jsonData);
-        lastDataReceived[clientIdx] = millis();
-    } else {
-        Serial.println("MQTT not connected, cannot publish");
-    }
-
+    publishRealTimeData(clientIdx);
+    
     Serial.println("\n-------- Parsed Real-Time Data --------");
-    Serial.printf("Device: %d\n", clientIdx + 1);
     Serial.printf("Measurement Cycle: %d\n", measurementCycle);
-    Serial.printf("Number of Readings: %d\n", readingCount);
+    Serial.printf("Timestamp: %lu\n", timestamp);
+    Serial.printf("Reading: %.3f\n", reading);
     Serial.println("----------------------------------------\n");
 }
 
@@ -173,6 +166,7 @@ class MyClientCallback : public BLEClientCallbacks {
 bool connectBLE(uint16_t clientIdx, const BLEAddress& addr) {
     unsigned long startTime = millis();
     
+    // Cleanup existing client if exists
     if (pClients[clientIdx] != nullptr) {
         pClients[clientIdx]->disconnect();
         delete pClients[clientIdx];
@@ -208,10 +202,12 @@ bool connectBLE(uint16_t clientIdx, const BLEAddress& addr) {
         return false;
     }
     
-    // Register for notifications with the new data processing
+    // Register for notifications with improved handling
     chr->registerForNotify([clientIdx](BLERemoteCharacteristic* chr, uint8_t* data, size_t length, bool isNotify) {
-        String value = String((char*)data, length);
-        processIncomingData(clientIdx, value);
+        if (length > 0) {
+            String value = String((char*)data, length);
+            processIncomingData(clientIdx, value);
+        }
     });
     
     return true;
@@ -237,6 +233,7 @@ void setup() {
     // Initialize sensor data buffers
     for (int i = 0; i < 2; i++) {
         memset(&sensorDataBuffer[i], 0, sizeof(RealTimeSensorData));
+        sensorDataBuffer[i].isNewData = false;
     }
 }
 

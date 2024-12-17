@@ -9,44 +9,47 @@
 #define DEVICE_NAME "ESP32-Current-Sensor2"
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789ab2"
 #define CHAR_UUID "abcdabcd-1234-5678-abcd-123456789abc"
-#define DATA_INTERVAL 1000    // Interval between sensor readings unit second(s)
-#define SEND_INTERVAL 1000    // Interval between sending data
+#define DATA_INTERVAL 1000    // Interval between sending data
+#define MAX_CYCLES 100        // Maximum number of test cycles
 
-// MCP3221 Configuration
-#define SDA_PIN 8   // SDA ของ ESP32-C3 Supermini
-#define SCL_PIN 9   // SCL ของ ESP32-C3 Supermini
-#define MCP3221_ADDRESS 0x4D // I2C Address ของ MCP3221
-#define clockFrequency 400000
-#define offset 126
+// I2C and MCP3221 Configurations
+#define SDA_PIN 8             // SDA of ESP32-C3 Supermini
+#define SCL_PIN 9             // SCL of ESP32-C3 Supermini
+#define MCP3221_ADDRESS 0x4D  // I2C Address of MCP3221
+#define CLOCK_FREQUENCY 400000
+#define OFFSET 100.708008
+#define Gain 10
+#define CURRENT_RESISTOR 100  // Shunt resistor value in ohms
 
-// Variables for current measurement
-signed long long sum_all = 0;
-signed long long check_overflow = 0;
-uint32_t count_Value = 0;
-uint32_t count_overflow = 0;
-uint32_t count_sensorReading = 0;
-double current = 0;
-double V = 0;
-double V_rms = 0;
-double gain = 100;
-double R = 100;
+// Variables for sensor and BLE
+volatile float currentReading = 0.0;
+volatile float current = 0.0;
+volatile float voltageReading = 0.0;
+volatile float vrms = 0.0;
+unsigned long lastNotifyTime = 0;
+unsigned long lastReadingTime = 0;
 
-// New RTC memory variables to track sleep count
-RTC_DATA_ATTR float sensorReadings[20];
+// Test tracking variables
+int measurementCycle = 0;
+float sentReadings[MAX_CYCLES];
+unsigned long sentTimestamps[MAX_CYCLES];
+int successfulTransmissions = 0;
+int failedTransmissions = 0;
 
-// BLE Variables
+// Accumulation variables for RMS calculation
+volatile signed long long sum_all = 0;
+volatile uint32_t count_Value = 0;
+volatile uint32_t count_overflow = 0;
+
+// BLE
 BLEServer *pServer = nullptr;
 BLECharacteristic *pCharacteristic = nullptr;
 bool deviceConnected = false;
-unsigned long lastNotifyTime = 0;
-unsigned long lastReadingTime = 0;
-unsigned long lastSendingTime = 0;
-int measurementCycle = 0;
 
 class CharacteristicCallbacks: public BLECharacteristicCallbacks {
     void onStatus(BLECharacteristic* pCharacteristic, Status s, uint32_t code) {
         if (s == Status::SUCCESS_NOTIFY) {
-            Serial.printf("Notification success!\n");
+            Serial.println("Notification success!");
         } else {
             Serial.printf("Notification failed: status=%d, code=%d\n", s, code);
         }
@@ -56,17 +59,17 @@ class CharacteristicCallbacks: public BLECharacteristicCallbacks {
 class MyServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         deviceConnected = true;
-        Serial.printf("Device connected\n");
+        Serial.println("Device connected");
+        delay(1000);
     }
     
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
-        Serial.printf("Device disconnected\n");
+        Serial.println("Device disconnected");
         BLEDevice::startAdvertising();
     }
 };
 
-// MCP3221 Reading Function
 uint16_t readMCP3221() {
     unsigned int rawData = 0;
     Wire.beginTransmission(MCP3221_ADDRESS);
@@ -80,74 +83,79 @@ uint16_t readMCP3221() {
     return rawData;
 }
 
-void readSensorData() {
-    uint16_t adcValue = readMCP3221(); // Read ADC value
-    V = (adcValue * 3.3*1000) / 4096.0; // คำนวณแรงดันไฟฟ้า (VREF = 3.3V) mV
-    // Update running sum for RMS calculation
-    sum_all += (V - offset) * (V - offset);
+void IRAM_ATTR readSensorData() {
+    // Read ADC value
+    uint16_t adcValue = readMCP3221();
+    
+    // Calculate voltage (in mV)
+    float instantVoltage = (adcValue * 3.3 * 1000) / 4096.0;
+    Serial.printf("%f, %f, %f\n",instantVoltage - OFFSET,instantVoltage,currentReading);
+    // Accumulate for RMS calculation
+    signed long long check_overflow = sum_all;
+    sum_all += (instantVoltage - OFFSET) * (instantVoltage - OFFSET);
     count_Value++;
     
-    // Check for overflow
+    // Handle potential overflow
     if(sum_all < check_overflow) {
-        count_overflow++;
         sum_all = 0;
         count_Value = 0;
-        sum_all += (V - offset) * (V - offset);
+        count_overflow++;
+        sum_all += (instantVoltage - OFFSET) * (instantVoltage - OFFSET);
         count_Value++;
     }
     
-    // Calculate RMS current every 4000 samples
-    if(count_Value == 4000) {
-        V_rms = sqrt(sum_all / count_Value);
+    // Update volatile variables
+    voltageReading = instantVoltage;
+    
+    // Calculate RMS and current every 4000 samples
+    if(count_Value == 1000) {
+        vrms = sqrt(sum_all / count_Value);
+        current = vrms / CURRENT_RESISTOR;
+        currentReading = current*Gain;
         sum_all = 0;
         count_Value = 0;
-        current = V_rms/R;
-        sensorReadings[count_sensorReading] = current;
-        count_sensorReading++;
-        
     }
 }
 
 void sendRealtimeData() {
-    if (!deviceConnected) {
-        return;
-    }
-
-    unsigned long currentTime = millis();
-    if (currentTime - lastNotifyTime < SEND_INTERVAL) {
-        return;
-    }
-
-    // Prepare data string with measurement cycle, sleep count, and sensor readings
-    String data = String(measurementCycle) + ",";
     
-    // Add all sensor readings to the data string
-    for (int i = 0; i < count_sensorReading; i++) {
-        data += String(sensorReadings[i]);
-        if (i < count_sensorReading - 1) {
-            data += ",";
-        }
+    unsigned long currentTime = millis();
+    if (currentTime - lastNotifyTime < DATA_INTERVAL) {
+        return;
     }
-
+    
+    // Prepare data string with measurement cycle, timestamp, voltage, RMS, and current
+    String data = String(measurementCycle) + "," +
+                  String(currentTime) + "," +
+                  String(currentReading, 3);
+    
     Serial.printf("Sending real-time data: %s\n", data.c_str());
     
     pCharacteristic->setValue(data.c_str());
     pCharacteristic->notify();
     
+    // Store sent data for verification
+    sentReadings[measurementCycle] = currentReading;
+    sentTimestamps[measurementCycle] = currentTime;
+    
     lastNotifyTime = currentTime;
     measurementCycle++;
+}
 
-    // Reset count_sensorReading after sending
-    count_sensorReading = 0;
+void printTestResults() {
+    Serial.println("\n===== TEST RESULTS =====");
+    Serial.printf("Total Cycles: %d\n", MAX_CYCLES);
+    Serial.printf("Successful Transmissions: %d\n", successfulTransmissions);
+    Serial.printf("Failed Transmissions: %d\n", failedTransmissions);
+    Serial.println("=======================\n");
 }
 
 void setup() {
     Serial.begin(115200);
     
     // Initialize I2C
-    Wire.begin();
-    Wire.setClock(clockFrequency);
-    Serial.printf("MCP3221 I2C Reader Initialized\n");
+    Wire.begin(SDA_PIN, SCL_PIN);
+    Wire.setClock(CLOCK_FREQUENCY);
     
     // Initialize BLE
     BLEDevice::init(DEVICE_NAME);
@@ -169,20 +177,26 @@ void setup() {
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
     pAdvertising->setMinPreferred(0x06);
-
     BLEDevice::startAdvertising();
     
-    Serial.printf("Current Sensor ready and advertising...\n");
+    Serial.println("Sensor ready and advertising...");
 }
 
 void loop() {
     readSensorData();
-    if(!deviceConnected) {
-        BLEDevice::startAdvertising();
+    unsigned long currentTime = millis();
+    
+    // Check if BLE Client has enabled notifications
+    uint8_t notifyStatus = pCharacteristic->getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->getValue()[0];
+    if (notifyStatus != 0x01) {
+        Serial.println("Notifications not enabled by client yet.");
+        return;  // Wait for client to enable notifications
     }
-    if(count_sensorReading == 20){
-        if(deviceConnected) {
-            sendRealtimeData();
-        }
+
+    if (currentTime - lastReadingTime >= DATA_INTERVAL) {
+        lastReadingTime = currentTime;
+        sendRealtimeData();
     }
+    
+    // End test after MAX_CYCLES
 }
